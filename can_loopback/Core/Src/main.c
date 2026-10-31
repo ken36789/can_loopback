@@ -21,9 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
-#include <string.h>
-#include "can_display.h"   // LCD 顯示 (Core/Src/can_display.c)
+#include "can_app.h"   // CAN 測試流程 (Core/Src/can_app.c)，參數在 can_config.h
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,13 +31,12 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define CAN_DATA_LEN  16U   // 每包資料長度，需和 txHeader.DataLength (FDCAN_DLC_BYTES_16) 一致
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-// 把 ns 拆成 "整數 us" 和 "小數兩位"，給 printf 的 "%lu.%02lu" 用 (newlib-nano 預設不支援 %f)
-#define US_PARTS(ns)  (unsigned long)((ns) / 1000U), (unsigned long)(((ns) % 1000U) / 10U)
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -49,18 +46,7 @@ FDCAN_HandleTypeDef hfdcan1;
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-FDCAN_TxHeaderTypeDef txHeader;
-FDCAN_RxHeaderTypeDef rxHeader;
-uint8_t txData[CAN_DATA_LEN];
-uint8_t rxData[64];        // HAL 依收到的 DLC 寫入，CAN FD 最多 64 bytes
-volatile uint8_t rxFlag = 0;
-uint32_t txCount = 0, rxCount = 0;
 
-// TX -> RX 延遲量測 (單位：CPU 週期，DWT 計數器)
-volatile uint32_t txStartCyc = 0;     // 呼叫送出前的時間點
-volatile uint32_t rxLatencyCyc = 0;   // RX 中斷裡算出的 TX -> RX 週期數
-uint32_t latMinCyc = UINT32_MAX, latMaxCyc = 0;
-uint64_t latSumCyc = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -79,35 +65,6 @@ int __io_putchar(int ch)   // 讓 printf 輸出到 USART3
 {
   HAL_UART_Transmit(&huart3, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
   return ch;
-}
-
-static uint32_t dlc_to_bytes(uint32_t dlc)   // DLC 代碼 -> 位元組數 (CAN FD 的 9~15 代表 12~64)
-{
-  static const uint8_t table[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64};
-  return table[dlc & 0xFU];
-}
-
-static void cycle_counter_init(void)   // 開啟 DWT 週期計數器：每個 CPU 時脈 +1 (25 MHz -> 40 ns)
-{
-  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-  DWT->LAR = 0xC5ACCE55;               // Cortex-M7 要先解鎖 DWT 才能寫入
-  DWT->CYCCNT = 0;
-  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-}
-
-static uint32_t cycles_to_ns(uint32_t cyc)
-{
-  return (uint32_t)(((uint64_t)cyc * 1000000000ULL) / SystemCoreClock);
-}
-
-void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
-{
-  uint32_t now = DWT->CYCCNT;          // 一進中斷就先記時間，不把讀取資料的時間算進去
-  if (RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) {
-    HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData);
-    rxLatencyCyc = now - txStartCyc;   // 無號數相減，計數器繞回也算得對
-    rxFlag = 1;
-  }
 }
 /* USER CODE END 0 */
 
@@ -130,7 +87,8 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  SCB_EnableICache();   // 指令快取：400 MHz 下 Flash 有等待週期，靠 I-Cache 補回執行速度
+                        // D-Cache 不開：LCD 畫面緩衝區由 DMA2D / LTDC 直接存取，開了要處理快取一致性
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -145,34 +103,7 @@ int main(void)
   MX_FDCAN1_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-  FDCAN_FilterTypeDef filter = {0};
-  filter.IdType = FDCAN_EXTENDED_ID;   // 29-bit ID 的過濾器
-  filter.FilterIndex = 0;
-  filter.FilterType = FDCAN_FILTER_MASK;
-  filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-  filter.FilterID1 = 0x000;
-  filter.FilterID2 = 0x000;          // mask 全 0 = 全部接收
-  HAL_FDCAN_ConfigFilter(&hfdcan1, &filter);
-  HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
-  cycle_counter_init();
-  HAL_FDCAN_Start(&hfdcan1);
-
-  txHeader.Identifier = 0x12345678;              // 29-bit ID，最大 0x1FFFFFFF
-  txHeader.IdType = FDCAN_EXTENDED_ID;
-  txHeader.TxFrameType = FDCAN_DATA_FRAME;
-  txHeader.DataLength = FDCAN_DLC_BYTES_16;      // DLC 代碼 0xA = 16 bytes
-  txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-  txHeader.BitRateSwitch = FDCAN_BRS_ON;         // ID/ACK 用 1 Mbit/s，DLC~CRC 用 2.5 Mbit/s
-  txHeader.FDFormat = FDCAN_FD_CAN;              // 超過 8 bytes 必須用 CAN FD 格式
-  txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-  txHeader.MessageMarker = 0;
-  printf("CAN loopback start\r\n");
-
-  int32_t lcdStatus = CAN_Display_Init();   // 初始化螢幕並畫出版面
-  if (lcdStatus != 0)
-    printf("LCD init failed (BSP error %ld)\r\n", lcdStatus);
-  else
-    printf("LCD ready\r\n");
+  CAN_App_Init(&hfdcan1);   // 啟動 FDCAN 收發、延遲量測、比對和 LCD
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -182,53 +113,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    static uint32_t lastTx = 0;
-    static uint8_t counter = 0;
-    if (HAL_GetTick() - lastTx >= 1000) {        // 每秒發一包
-      lastTx = HAL_GetTick();
-      for (uint32_t i = 0; i < CAN_DATA_LEN; i++) txData[i] = counter + i;
-      counter++;
-      txStartCyc = DWT->CYCCNT;                  // 延遲量測起點
-      if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, txData) == HAL_OK) {
-        txCount++;
-        printf("TX id=0x%08lX\r\n", txHeader.Identifier);
-        CAN_Display_ShowTx(txHeader.Identifier, txData, CAN_DATA_LEN, txCount, 1);
-      } else {
-        printf("TX fail, free=%lu, PSR=0x%08lX\r\n",
-               HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1), hfdcan1.Instance->PSR);
-        CAN_Display_ShowTx(txHeader.Identifier, txData, CAN_DATA_LEN, txCount, 0);
-      }
-    }
-    if (rxFlag) {
-      // 先把中斷收到的資料複製出來，避免印到一半被下一包蓋掉
-      FDCAN_RxHeaderTypeDef hdr;
-      uint8_t data[sizeof(rxData)];
-      __disable_irq();
-      hdr = rxHeader;
-      memcpy(data, rxData, sizeof(data));
-      uint32_t latCyc = rxLatencyCyc;
-      rxFlag = 0;
-      __enable_irq();
-
-      uint32_t len = dlc_to_bytes(hdr.DataLength);  // CAN FD: DLC 是代碼，要查表換成位元組數
-      rxCount++;
-      printf("RX id=0x%08lX data:", hdr.Identifier);
-      for (uint32_t i = 0; i < len; i++) printf(" %02X", data[i]);
-      printf("\r\n");
-      CAN_Display_ShowRx(hdr.Identifier, data, len, rxCount);
-
-      // TX -> RX 延遲統計
-      if (latCyc < latMinCyc) latMinCyc = latCyc;
-      if (latCyc > latMaxCyc) latMaxCyc = latCyc;
-      latSumCyc += latCyc;
-      uint32_t latNs = cycles_to_ns(latCyc);
-      uint32_t minNs = cycles_to_ns(latMinCyc);
-      uint32_t maxNs = cycles_to_ns(latMaxCyc);
-      uint32_t avgNs = cycles_to_ns((uint32_t)(latSumCyc / rxCount));
-      printf("TX->RX %lu.%02lu us (min %lu.%02lu / avg %lu.%02lu / max %lu.%02lu)\r\n",
-             US_PARTS(latNs), US_PARTS(minNs), US_PARTS(avgNs), US_PARTS(maxNs));
-      CAN_Display_ShowLatency(latNs, minNs, avgNs, maxNs);
-    }
+    CAN_App_Process();      // 時間到就送一包，有收到就比對、量測並顯示
   }
   /* USER CODE END 3 */
 }
@@ -248,7 +133,7 @@ void SystemClock_Config(void)
 
   /** Configure the main internal regulator output voltage
   */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);   // 400 MHz 需要 VOS1
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
@@ -257,7 +142,16 @@ void SystemClock_Config(void)
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;   // 三組 PLL 共用來源，LTDC 的 PLL3 也要 HSE
+  RCC_OscInitStruct.PLL.PLLM = 5;                        // 25 MHz / 5 = 5 MHz
+  RCC_OscInitStruct.PLL.PLLN = 160;                      // x 160 = 800 MHz (VCO)
+  RCC_OscInitStruct.PLL.PLLP = 2;                        // / 2 = 400 MHz -> SYSCLK
+  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLR = 2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_2;     // PLL 輸入 4~8 MHz
+  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -268,15 +162,15 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
                               |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
-  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;     // CPU 400 MHz
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;       // AXI / AHB 200 MHz
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;      // 四組 APB 都是 100 MHz
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;      // 要和 APB2 相同：BSP 用 PCLK2 計算 I2C4 (觸控 IC) 的時序
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)   // 4 WS：保守設定，一定在規格內
   {
     Error_Handler();
   }
@@ -308,14 +202,14 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.NominalTimeSeg1 = 19;     // 1 + 19 + 5 = 25 tq = 1 us -> 1 Mbit/s
   hfdcan1.Init.NominalTimeSeg2 = 5;      // 取樣點 (1 + 19) / 25 = 80%
   hfdcan1.Init.DataPrescaler = 1;        // 資料段 (BRS 開啟時才使用)：1 tq = 40 ns
-  hfdcan1.Init.DataSyncJumpWidth = 2;
-  hfdcan1.Init.DataTimeSeg1 = 7;         // 1 + 7 + 2 = 10 tq = 400 ns -> 2.5 Mbit/s
-  hfdcan1.Init.DataTimeSeg2 = 2;         // 取樣點 (1 + 7) / 10 = 80%
+  hfdcan1.Init.DataSyncJumpWidth = 1;    // SJW 不能大於 Seg2
+  hfdcan1.Init.DataTimeSeg1 = 3;         // 1 + 3 + 1 = 5 tq = 200 ns -> 5 Mbit/s
+  hfdcan1.Init.DataTimeSeg2 = 1;         // 取樣點 (1 + 3) / 5 = 80%；每 bit 只有 5 tq，接實體匯流排前應提高 FDCAN 時脈
   hfdcan1.Init.MessageRAMOffset = 0;
   hfdcan1.Init.StdFiltersNbr = 0;
   hfdcan1.Init.ExtFiltersNbr = 1;                      // 改用 29-bit ID 的過濾器
   hfdcan1.Init.RxFifo0ElmtsNbr = 8;
-  hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_16;  // Message RAM 每格要放得下 16 bytes
+  hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_16;  // Message RAM 每格要放得下 CAN_APP_DATA_LEN (can_config.h)
   hfdcan1.Init.RxFifo1ElmtsNbr = 0;
   hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
   hfdcan1.Init.RxBuffersNbr = 0;
@@ -324,7 +218,7 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.TxBuffersNbr = 0;
   hfdcan1.Init.TxFifoQueueElmtsNbr = 8;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
-  hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_16;
+  hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_16;       // 同上
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
   {
     Error_Handler();

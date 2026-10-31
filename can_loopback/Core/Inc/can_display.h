@@ -23,9 +23,13 @@ int32_t CAN_Display_Init(void);
 void CAN_Display_ShowTx(uint32_t id, const uint8_t *data, uint32_t len,
                         uint32_t count, int ok);
 
-/* 更新 RX 區塊，並和最後一包 TX 比對內容。 */
+/* 更新 RX 區塊 (只顯示，比對由 can_verify 負責)。 */
 void CAN_Display_ShowRx(uint32_t id, const uint8_t *data, uint32_t len,
                         uint32_t count);
+
+/* 狀態列：這一包的比對結果和累計統計。good = 1 綠色，0 紅色。 */
+void CAN_Display_ShowCheck(const char *label, int good, uint32_t seq,
+                           uint32_t errors, uint32_t lost);
 
 /* 更新最下面一行的 TX -> RX 延遲 (單位 ns)：這一包、最小、平均、最大 */
 void CAN_Display_ShowLatency(uint32_t last_ns, uint32_t min_ns,

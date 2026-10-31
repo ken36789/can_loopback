@@ -8,7 +8,7 @@
   *
   *          和 ST 範例不同的兩個地方：
   *          1. 畫面緩衝區放在晶片內部的 AXI SRAM，不用外部 SDRAM。
-  *          2. 本專案沒有開 PLL1，所以 LTDC 的像素時脈 (PLL3) 在這裡自己設定。
+  *          2. LTDC 的像素時脈 (PLL3) 在這裡自己設定，並確認 PLL 輸入來源是 HSE。
   ******************************************************************************
   */
 #include "can_display.h"
@@ -55,10 +55,6 @@ uint16_t lcd_framebuffer[SCREEN_W * SCREEN_H] __attribute__((aligned(64)));
 #define DATA_ROW_H    22U     /* 兩行資料的間距 */
 
 static int      lcd_ready = 0;
-static uint8_t  last_tx[CAN_DISPLAY_MAX_BYTES];
-static uint32_t last_tx_len = 0;
-static uint32_t last_tx_id = 0;
-static int      have_tx = 0;
 
 /* 在指定位置以指定字型、顏色畫一行字 (靠左) */
 static void text_at(uint32_t x, uint32_t y, sFONT *font,
@@ -119,7 +115,7 @@ static void draw_layout(void)
   /* 標題列 */
   UTIL_LCD_FillRect(0, 0, SCREEN_W, 34, COLOR_TITLE);
   text_center(5, &Font24, COLOR_TEXT, COLOR_TITLE, "FDCAN1 Loopback Monitor");
-  text_center(Y_SUBTITLE, &Font16, COLOR_DIM, COLOR_BG, "Loopback  CAN FD  1M/2.5M BRS  29-bit ID");
+  text_center(Y_SUBTITLE, &Font16, COLOR_DIM, COLOR_BG, "Loopback  CAN FD  1M/5M BRS  29-bit ID");
 
   /* 分隔線 */
   UTIL_LCD_DrawHLine(0, Y_LINE_1, SCREEN_W, COLOR_LINE);
@@ -157,13 +153,8 @@ void CAN_Display_ShowTx(uint32_t id, const uint8_t *data, uint32_t len,
 {
   char buf[40];
 
-  if (len > CAN_DISPLAY_MAX_BYTES) len = CAN_DISPLAY_MAX_BYTES;
-  memcpy(last_tx, data, len);
-  last_tx_len = len;
-  last_tx_id  = id;
-  have_tx     = ok;
-
   if (!lcd_ready) return;
+  if (len > CAN_DISPLAY_MAX_BYTES) len = CAN_DISPLAY_MAX_BYTES;
 
   snprintf(buf, sizeof(buf), "ID 0x%08lX", (unsigned long)id);
   text_at(X_VALUE, Y_TX, &Font24, COLOR_TEXT, COLOR_BG, buf);
@@ -190,17 +181,18 @@ void CAN_Display_ShowRx(uint32_t id, const uint8_t *data, uint32_t len,
   snprintf(buf, sizeof(buf), "count %-6lu", (unsigned long)count);
   text_at(X_COUNT, Y_RX + 4U, &Font20, COLOR_DIM, COLOR_BG, buf);
   show_data(Y_RX_DATA, data, len);
+}
 
-  /* 和最後一包 TX 比對：loopback 正常的話內容應該一模一樣 */
-  if (have_tx && (id == last_tx_id) && (len == last_tx_len) &&
-      (memcmp(data, last_tx, len) == 0))
-  {
-    show_status("OK: RX matches TX", COLOR_RX);
-  }
-  else
-  {
-    show_status("RX differs from last TX", COLOR_ERR);
-  }
+void CAN_Display_ShowCheck(const char *label, int good, uint32_t seq,
+                           uint32_t errors, uint32_t lost)
+{
+  char buf[40];
+
+  if (!lcd_ready) return;
+
+  snprintf(buf, sizeof(buf), "%s #%lu  err %lu  lost %lu", label,
+           (unsigned long)seq, (unsigned long)errors, (unsigned long)lost);
+  show_status(buf, good ? COLOR_RX : COLOR_ERR);
 }
 
 void CAN_Display_ShowLatency(uint32_t last_ns, uint32_t min_ns,
@@ -221,8 +213,9 @@ void CAN_Display_ShowLatency(uint32_t last_ns, uint32_t min_ns,
 
 /**
   * @brief  LTDC 像素時脈設定 (覆寫 BSP 裡的 __weak 版本)。
-  *         BSP 原本的版本假設 PLL 輸入已經是 25 MHz 的 HSE，但本專案沒有開 PLL1，
-  *         PLL 輸入來源還停在開機預設的 HSI (64 MHz)，PLL3 會算錯，所以先切到 HSE。
+  *         BSP 原本的版本假設 PLL 輸入已經是 25 MHz 的 HSE，也沒有設定 PLL3RGE。
+  *         PLL 輸入來源由三組 PLL 共用：SystemClock_Config 開 PLL1 時已經選 HSE；
+  *         如果 PLL 都還沒開 (來源停在開機預設的 HSI 64 MHz)，這裡先切到 HSE。
   *         25 MHz / M(5) = 5 MHz -> x N(160) = 800 MHz -> / R(83) = 9.64 MHz
   */
 HAL_StatusTypeDef MX_LTDC_ClockConfig(LTDC_HandleTypeDef *hltdc)
