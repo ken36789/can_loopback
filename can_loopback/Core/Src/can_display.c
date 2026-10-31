@@ -42,15 +42,20 @@ uint16_t lcd_framebuffer[SCREEN_W * SCREEN_H] __attribute__((aligned(64)));
 #define X_LABEL       12U     /* "TX" / "RX" 標籤 */
 #define X_VALUE       60U     /* ID 和資料 */
 #define X_COUNT       300U    /* 計數 */
-#define Y_TX          74U
-#define Y_TX_DATA     104U
-#define Y_RX          146U
-#define Y_RX_DATA     176U
-#define Y_STATUS      218U
-#define Y_FOOTER      250U
+#define Y_SUBTITLE    38U
+#define Y_LINE_1      58U
+#define Y_TX          62U
+#define Y_TX_DATA     90U     /* 資料兩行 (Font20)：byte 0~7、byte 8~15 */
+#define Y_LINE_2      138U
+#define Y_RX          142U
+#define Y_RX_DATA     170U
+#define Y_LINE_3      218U
+#define Y_STATUS      224U
+#define Y_FOOTER      254U
+#define DATA_ROW_H    22U     /* 兩行資料的間距 */
 
 static int      lcd_ready = 0;
-static uint8_t  last_tx[8];
+static uint8_t  last_tx[CAN_DISPLAY_MAX_BYTES];
 static uint32_t last_tx_len = 0;
 static uint32_t last_tx_id = 0;
 static int      have_tx = 0;
@@ -96,6 +101,17 @@ static void show_status(const char *msg, uint32_t color)
   text_at(X_LABEL, Y_STATUS, &Font20, color, COLOR_BG, buf);
 }
 
+/* 資料分兩行顯示：第一行 byte 0~7，第二行 byte 8~15 */
+static void show_data(uint32_t y, const uint8_t *d, uint32_t len)
+{
+  char buf[40];
+
+  format_bytes(buf, sizeof(buf), d, (len > 8U) ? 8U : len);
+  text_at(X_VALUE, y, &Font20, COLOR_TEXT, COLOR_BG, buf);
+  format_bytes(buf, sizeof(buf), d + 8, (len > 8U) ? (len - 8U) : 0U);
+  text_at(X_VALUE, y + DATA_ROW_H, &Font20, COLOR_TEXT, COLOR_BG, buf);
+}
+
 static void draw_layout(void)
 {
   UTIL_LCD_Clear(COLOR_BG);
@@ -103,12 +119,12 @@ static void draw_layout(void)
   /* 標題列 */
   UTIL_LCD_FillRect(0, 0, SCREEN_W, 34, COLOR_TITLE);
   text_center(5, &Font24, COLOR_TEXT, COLOR_TITLE, "FDCAN1 Loopback Monitor");
-  text_center(42, &Font16, COLOR_DIM, COLOR_BG, "Internal loopback  500 kbit/s  Classic");
+  text_center(Y_SUBTITLE, &Font16, COLOR_DIM, COLOR_BG, "Loopback  CAN FD  1M/2.5M BRS  29-bit ID");
 
   /* 分隔線 */
-  UTIL_LCD_DrawHLine(0, 64, SCREEN_W, COLOR_LINE);
-  UTIL_LCD_DrawHLine(0, 136, SCREEN_W, COLOR_LINE);
-  UTIL_LCD_DrawHLine(0, 208, SCREEN_W, COLOR_LINE);
+  UTIL_LCD_DrawHLine(0, Y_LINE_1, SCREEN_W, COLOR_LINE);
+  UTIL_LCD_DrawHLine(0, Y_LINE_2, SCREEN_W, COLOR_LINE);
+  UTIL_LCD_DrawHLine(0, Y_LINE_3, SCREEN_W, COLOR_LINE);
 
   /* TX / RX 區塊 */
   text_at(X_LABEL, Y_TX, &Font24, COLOR_TX, COLOR_BG, "TX");
@@ -117,7 +133,7 @@ static void draw_layout(void)
   text_at(X_VALUE, Y_RX, &Font24, COLOR_DIM, COLOR_BG, "ID --");
 
   show_status("Waiting for data...", COLOR_DIM);
-  text_center(Y_FOOTER, &Font16, COLOR_DIM, COLOR_BG, "PC: STLink VCP, 115200 8N1");
+  text_at(X_LABEL, Y_FOOTER, &Font16, COLOR_DIM, COLOR_BG, "TX->RX latency: --");
 }
 
 int32_t CAN_Display_Init(void)
@@ -141,7 +157,7 @@ void CAN_Display_ShowTx(uint32_t id, const uint8_t *data, uint32_t len,
 {
   char buf[40];
 
-  if (len > 8U) len = 8U;
+  if (len > CAN_DISPLAY_MAX_BYTES) len = CAN_DISPLAY_MAX_BYTES;
   memcpy(last_tx, data, len);
   last_tx_len = len;
   last_tx_id  = id;
@@ -149,12 +165,11 @@ void CAN_Display_ShowTx(uint32_t id, const uint8_t *data, uint32_t len,
 
   if (!lcd_ready) return;
 
-  snprintf(buf, sizeof(buf), "ID 0x%-8lX", (unsigned long)id);
+  snprintf(buf, sizeof(buf), "ID 0x%08lX", (unsigned long)id);
   text_at(X_VALUE, Y_TX, &Font24, COLOR_TEXT, COLOR_BG, buf);
   snprintf(buf, sizeof(buf), "count %-6lu", (unsigned long)count);
   text_at(X_COUNT, Y_TX + 4U, &Font20, COLOR_DIM, COLOR_BG, buf);
-  format_bytes(buf, sizeof(buf), data, len);
-  text_at(X_VALUE, Y_TX_DATA, &Font24, COLOR_TEXT, COLOR_BG, buf);
+  show_data(Y_TX_DATA, data, len);
 
   if (!ok)
   {
@@ -168,14 +183,13 @@ void CAN_Display_ShowRx(uint32_t id, const uint8_t *data, uint32_t len,
   char buf[40];
 
   if (!lcd_ready) return;
-  if (len > 8U) len = 8U;
+  if (len > CAN_DISPLAY_MAX_BYTES) len = CAN_DISPLAY_MAX_BYTES;
 
-  snprintf(buf, sizeof(buf), "ID 0x%-8lX", (unsigned long)id);
+  snprintf(buf, sizeof(buf), "ID 0x%08lX", (unsigned long)id);
   text_at(X_VALUE, Y_RX, &Font24, COLOR_TEXT, COLOR_BG, buf);
   snprintf(buf, sizeof(buf), "count %-6lu", (unsigned long)count);
   text_at(X_COUNT, Y_RX + 4U, &Font20, COLOR_DIM, COLOR_BG, buf);
-  format_bytes(buf, sizeof(buf), data, len);
-  text_at(X_VALUE, Y_RX_DATA, &Font24, COLOR_TEXT, COLOR_BG, buf);
+  show_data(Y_RX_DATA, data, len);
 
   /* 和最後一包 TX 比對：loopback 正常的話內容應該一模一樣 */
   if (have_tx && (id == last_tx_id) && (len == last_tx_len) &&
@@ -187,6 +201,22 @@ void CAN_Display_ShowRx(uint32_t id, const uint8_t *data, uint32_t len,
   {
     show_status("RX differs from last TX", COLOR_ERR);
   }
+}
+
+void CAN_Display_ShowLatency(uint32_t last_ns, uint32_t min_ns,
+                             uint32_t avg_ns, uint32_t max_ns)
+{
+  char line[48];
+  char buf[48];
+
+  if (!lcd_ready) return;
+
+  /* 以 us 顯示 (四捨五入)。Font16 從 X_LABEL 起一行最多 42 字，固定 42 字寬蓋掉舊字 */
+  snprintf(line, sizeof(line), "TX->RX %luus  min %lu  avg %lu  max %lu",
+           (unsigned long)((last_ns + 500U) / 1000U), (unsigned long)((min_ns + 500U) / 1000U),
+           (unsigned long)((avg_ns + 500U) / 1000U), (unsigned long)((max_ns + 500U) / 1000U));
+  snprintf(buf, sizeof(buf), "%-42.42s", line);
+  text_at(X_LABEL, Y_FOOTER, &Font16, COLOR_TEXT, COLOR_BG, buf);
 }
 
 /**
