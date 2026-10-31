@@ -1,0 +1,20 @@
+# ---- STM32CubeIDE 編譯產生的檔案 (每次 Build 都會重新產生，不用存) ----
+Debug/
+Release/
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.map
+*.list
+*.hex
+*.bin
+
+# ---- IDE 自動產生的個人設定 / 索引 ----
+.metadata/
+.settings/language.settings.xml
+
+# ---- 編輯器暫存檔 ----
+*.bak
+*~
